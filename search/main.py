@@ -33,10 +33,10 @@ OPEN_API_LOGIN = os.getenv("OPEN_API_LOGIN")
 OPEN_API_PASSWORD = os.getenv("OPEN_API_PASSWORD")
 
 # Optimized retrieval limits
-DENSE_PREFETCH_K = 50
-SPARSE_PREFETCH_K = 100
-RETRIEVE_K = 50
-RERANK_LIMIT = 50
+DENSE_PREFETCH_K = 150
+SPARSE_PREFETCH_K = 150
+RETRIEVE_K = 100
+RERANK_LIMIT = 100
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("search-service")
@@ -95,17 +95,16 @@ class QueryExpander:
     @staticmethod
     def build_sparse(q: Question) -> str:
         parts = [q.text]
-        # Weighted signal
+        # Massive boost for exact keywords and search_text
         s_text = q.search_text or q.text
-        parts.extend([s_text] * 3)
+        parts.extend([s_text] * 10) 
         if q.keywords:
             for kw in q.keywords:
-                parts.extend([kw] * 5)
+                parts.extend([kw] * 15)
+        # Add names with high weight
         if q.entities and q.entities.names:
             for n in q.entities.names:
-                parts.extend([n] * 3)
-        if q.variants:
-            parts.extend(q.variants)
+                parts.extend([n] * 5)
         return " ".join(parts)
 
     @staticmethod
@@ -246,11 +245,8 @@ async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
     final_message_ids = []
     seen_ids = set()
     
-    # Precision trick: if top score is significantly higher than others, 
-    # we could take only that. For now, take from points that reranker liked.
+    # Precision trick: we trust reranker's relative ordering.
     for score, point in scored_points:
-        if score < 0.00001: # Filter out very low quality matches
-            continue
         meta = point.payload.get("metadata") or point.payload
         m_ids = meta.get("message_ids", [])
         for mid in m_ids:

@@ -70,8 +70,8 @@ class SparseVector(BaseModel):
 app = FastAPI(title="Index Service Enhanced", version="1.0.0")
 
 # --- Optimized Parameters ---
-CHUNK_SIZE = 5 # Messages per chunk for high Precision@3
-CHUNK_OVERLAP = 2
+CHUNK_SIZE = 3 # Small chunks = High Precision
+CHUNK_OVERLAP = 1
 SPARSE_MODEL_NAME = "Qdrant/bm25"
 FASTEMBED_CACHE_PATH = "/models/fastembed"
 UVICORN_WORKERS = 8
