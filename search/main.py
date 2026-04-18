@@ -2,7 +2,7 @@ import logging
 import os
 import asyncio
 
-# FORCE OFFLINE MODE for VK environment
+# FORCE OFFLINE MODE
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["FASTEMBED_OFFLINE"] = "1"
 
@@ -37,12 +37,12 @@ QDRANT_SPARSE_VECTOR_NAME = os.getenv("QDRANT_SPARSE_VECTOR_NAME", "sparse")
 OPEN_API_LOGIN = os.getenv("OPEN_API_LOGIN")
 OPEN_API_PASSWORD = os.getenv("OPEN_API_PASSWORD")
 
-# Optimized retrieval limits for VK Rate Limits
-DENSE_PREFETCH_K = 250
-SPARSE_PREFETCH_K = 250
-RETRIEVE_K = 200
-RERANK_LIMIT = 75 
-
+# Balanced retrieval for a large dataset
+DENSE_PREFETCH_K = 200
+SPARSE_PREFETCH_K = 200
+RETRIEVE_K = 150
+RERANK_LIMIT = 50 
+MAX_CHARS = 5000 
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("search-service")
@@ -87,63 +87,32 @@ class SparseVector(BaseModel):
     indices: list[int]
     values: list[float]
 
-# --- Query Expander Logic ---
+# --- Query Expander Logic (Balanced) ---
 class QueryExpander:
     @staticmethod
     def build_dense(q: Question) -> str:
+        # Just text and search_text for stability on big data
         parts = [q.text]
         if q.search_text and q.search_text != q.text:
             parts.append(q.search_text)
-        if q.hyde:
-            parts.extend(q.hyde)
-        return " ".join(parts)
+        return " ".join(parts)[:MAX_CHARS]
 
     @staticmethod
     def build_sparse(q: Question) -> str:
         parts = [q.text]
-        # Softened boost for general stability
-        s_text = q.search_text or q.text
-        parts.extend([s_text] * 3) 
         if q.keywords:
+            # Moderate boost for stability on large data
             for kw in q.keywords:
-                parts.extend([kw] * 7)
-        # Add names with high weight
-        if q.entities and q.entities.names:
-            for n in q.entities.names:
-                parts.extend([n] * 4)
-        return " ".join(parts)
+                parts.extend([kw] * 3)
+        return " ".join(parts)[:MAX_CHARS]
 
     @staticmethod
     def build_rerank(q: Question) -> str:
-        parts = [q.text]
-        if q.search_text and q.search_text != q.text:
-            parts.append(q.search_text)
-        if q.keywords:
-            parts.extend(q.keywords)
-        return " ".join(parts)
+        return q.text
 
     @staticmethod
     def build_filter(q: Question) -> models.Filter | None:
-        must = []
-        # Entities filter
-        if q.entities:
-            # Note: payload path might need adjustment based on how Index Service saves it
-            # Baseline doesn't have nested entities yet, but our enhanced Index Service might
-            if q.entities.people:
-                must.append(models.FieldCondition(key="participants", match=models.MatchAny(any=q.entities.people)))
-            # We can also add email/link filters if we index them
-        
-        # Date range
-        if q.date_range:
-            try:
-                def to_ts(s): return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
-                # Note: Baseline indexer doesn't save timestamps as ints yet, need to be careful
-                # If using baseline metadata format, filtering by date might require Index Service updates
-                pass 
-            except:
-                pass
-
-        return models.Filter(must=must) if must else None
+        return None # No hard filters to avoid false negatives
 
 # --- Services ---
 def get_upstream_request_kwargs() -> dict[str, Any]:
@@ -161,7 +130,7 @@ def get_sparse_model() -> SparseTextEmbedding:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.http = httpx.AsyncClient(timeout=30.0)
+    app.state.http = httpx.AsyncClient(timeout=60.0)
     app.state.qdrant = AsyncQdrantClient(url=QDRANT_URL, api_key=API_KEY)
     try:
         yield
@@ -169,7 +138,7 @@ async def lifespan(app: FastAPI):
         await app.state.http.aclose()
         await app.state.qdrant.close()
 
-app = FastAPI(title="Search Service Enhanced", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Search Service Balanced", version="1.1.0", lifespan=lifespan)
 
 async def embed_dense(client: httpx.AsyncClient, text: str) -> list[float]:
     resp = await client.post(
@@ -195,14 +164,12 @@ async def get_rerank_scores(client: httpx.AsyncClient, query: str, targets: list
                 json={"model": RERANKER_MODEL, "text_1": query, "text_2": targets}
             )
             if resp.status_code == 429:
-                wait = (attempt + 1) * 3
-                logger.warning(f"Rate limited (429). Waiting {wait}s...")
-                await asyncio.sleep(wait)
+                await asyncio.sleep((attempt + 1) * 3)
                 continue
             resp.raise_for_status()
             return [float(s["score"]) for s in resp.json().get("data", [])]
-        except Exception as e:
-            if attempt == 2: raise e
+        except Exception:
+            if attempt == 2: raise
             await asyncio.sleep(1)
     return []
 
@@ -216,18 +183,12 @@ async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
     client: httpx.AsyncClient = app.state.http
     qdrant: AsyncQdrantClient = app.state.qdrant
 
-    # 1. Expand Queries
-    dense_q = QueryExpander.build_dense(q)[:5000]
-    sparse_q = QueryExpander.build_sparse(q)[:5000]
-    rerank_q = QueryExpander.build_rerank(q)[:5000]
-    search_filter = QueryExpander.build_filter(q)
+    # 1. Embeddings
+    dense_q = QueryExpander.build_dense(q)
+    sparse_q = QueryExpander.build_sparse(q)
+    dense_vec, sparse_vec = await asyncio.gather(embed_dense(client, dense_q), embed_sparse(sparse_q))
 
-    # 2. Parallel Embedding
-    dense_vec_task = embed_dense(client, dense_q)
-    sparse_vec_task = embed_sparse(sparse_q)
-    dense_vec, sparse_vec = await asyncio.gather(dense_vec_task, sparse_vec_task)
-
-    # 3. Hybrid Search
+    # 2. Hybrid Search
     search_result = await qdrant.query_points(
         collection_name=QDRANT_COLLECTION_NAME,
         prefetch=[
@@ -239,7 +200,6 @@ async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
             ),
         ],
         query=models.FusionQuery(fusion=models.Fusion.RRF),
-        query_filter=search_filter,
         limit=RETRIEVE_K,
         with_payload=True
     )
@@ -247,34 +207,39 @@ async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
     if not search_result.points:
         return SearchAPIResponse(results=[SearchAPIItem(message_ids=[])])
 
-    # 4. Rerank Top candidates
     points = search_result.points
-    rerank_targets = [p.payload.get("page_content", "") for p in points[:RERANK_LIMIT]]
+    
+    # 3. Rerank top candidates
+    rerank_q = QueryExpander.build_rerank(q)
+    rerank_targets = [p.payload.get("page_content", "")[:MAX_CHARS] for p in points[:RERANK_LIMIT]]
     scores = await get_rerank_scores(client, rerank_q, rerank_targets)
     
-    # Sort by rerank score
-    scored_points = sorted(zip(scores, points), key=lambda x: x[0], reverse=True)
-    for s, p in scored_points[:5]:
-        logger.info(f"Top point score {s:.4f}: {p.payload.get('page_content')[:50]}...")
+    # 4. Sort and extract Unique IDs
+    scored_points = sorted(zip(scores, points[:RERANK_LIMIT]), key=lambda x: x[0], reverse=True)
     
-    # 5. Extract Unique Message IDs (keep order)
-    # We take IDs from top ranked points
     final_message_ids = []
     seen_ids = set()
     
-    # Precision trick: we trust reranker's relative ordering.
-    for score, point in scored_points:
+    # Take from reranked
+    for _, point in scored_points:
         meta = point.payload.get("metadata") or point.payload
-        m_ids = meta.get("message_ids", [])
-        for mid in m_ids:
+        for mid in meta.get("message_ids", []):
             smid = str(mid)
             if smid not in seen_ids:
                 final_message_ids.append(smid)
                 seen_ids.add(smid)
-        
-        # If we already have enough high-quality IDs, stop
-        if len(final_message_ids) >= 20:
-            break
+        if len(final_message_ids) >= 50: break
+
+    # Fallback to remaining
+    if len(final_message_ids) < 50:
+        for point in points[RERANK_LIMIT:]:
+            meta = point.payload.get("metadata") or point.payload
+            for mid in meta.get("message_ids", []):
+                smid = str(mid)
+                if smid not in seen_ids:
+                    final_message_ids.append(smid)
+                    seen_ids.add(smid)
+            if len(final_message_ids) >= 50: break
 
     return SearchAPIResponse(results=[SearchAPIItem(message_ids=final_message_ids[:50])])
 

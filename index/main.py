@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import asyncio
+import json
 
 # FORCE OFFLINE MODE for VK environment
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -9,21 +10,19 @@ os.environ["FASTEMBED_OFFLINE"] = "1"
 
 from functools import lru_cache
 from typing import Any
-import asyncio
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-# --- Environment Variables ---
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8000"))
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("index-service")
 
-# --- Models ---
+# --- Models from TZ ---
 class Chat(BaseModel):
     id: str
     name: str
@@ -72,106 +71,95 @@ class SparseVector(BaseModel):
     indices: list[int]
     values: list[float]
 
-# --- App ---
-app = FastAPI(title="Index Service Enhanced", version="1.0.0")
+class SparseEmbeddingResponse(BaseModel):
+    vectors: list[SparseVector]
 
-# --- Optimized Parameters ---
-CHUNK_SIZE = 8 # Balanced for real world recall
-CHUNK_OVERLAP = 3
+app = FastAPI(title="Index Service Balanced", version="1.1.0")
+
+# Parameters aligned with baseline for maximum precision
+CHUNK_SIZE = 512 
+OVERLAP_SIZE = 128
+MAX_CHARS = 5000 
 SPARSE_MODEL_NAME = "Qdrant/bm25"
-FASTEMBED_CACHE_PATH = "/models/fastembed"
 UVICORN_WORKERS = 8
 
 def render_message(message: Message) -> str:
-    """Rich rendering of message including parts and snippets."""
+    """Rich rendering from our previous work."""
     text_parts = []
-    
     if message.text:
         text_parts.append(message.text)
-        
     if message.parts:
         for part in message.parts:
             p_text = part.get("text")
-            if p_text:
-                text_parts.append(p_text)
-                
-    # Extract info from file snippets if they are JSON strings
+            if p_text: text_parts.append(p_text)
     if isinstance(message.file_snippets, str) and message.file_snippets.startswith("["):
         try:
-            import json
             snippets = json.loads(message.file_snippets)
             for s in snippets:
-                if s.get("name"):
-                    text_parts.append(f"Файл: {s['name']}")
-        except:
-            pass
-
+                if s.get("name"): text_parts.append(f"Файл: {s['name']}")
+        except: pass
     return "\n".join(text_parts).strip()
 
-def build_chunks_enhanced(
-    chat: Chat,
-    overlap_messages: list[Message],
-    new_messages: list[Message],
-) -> list[IndexAPIItem]:
-    """Sliding window chunking with metadata focus."""
-    all_msgs = overlap_messages + new_messages
-    # Filter hidden
-    active_msgs = [m for m in all_msgs if not m.is_hidden]
-    if not active_msgs:
-        return []
+def build_chunks(overlap_messages: list[Message], new_messages: list[Message]) -> list[IndexAPIItem]:
+    """Strict baseline-aligned character chunking with our rendering."""
+    result: list[IndexAPIItem] = []
 
-    results = []
-    step = max(1, CHUNK_SIZE - CHUNK_OVERLAP)
+    def build_text_and_ranges(messages: list[Message]) -> tuple[str, list[tuple[int, int, str]]]:
+        text_parts: list[str] = []
+        message_ranges: list[tuple[int, int, str]] = []
+        position = 0
+        for index, message in enumerate(messages):
+            text = render_message(message)
+            if not text: continue
+            if index > 0 and text_parts:
+                text_parts.append("\n")
+                position += 1
+            start = position
+            text_parts.append(text)
+            position += len(text)
+            message_ranges.append((start, position, message.id))
+        return "".join(text_parts), message_ranges
 
-    for i in range(0, len(active_msgs), step):
-        chunk_msgs = active_msgs[i : i + CHUNK_SIZE]
-        if not chunk_msgs:
-            break
-            
-        # Only index if at least one message is from 'new_messages' 
-        # (to avoid duplicating work from previous windows, 
-        # though the system usually handles this)
-        new_ids = {m.id for m in new_messages}
-        if not any(m.id in new_ids for m in chunk_msgs):
-            continue
+    def slice_tail(text: str, tail_size: int) -> str:
+        if tail_size <= 0: return ""
+        return text[max(0, len(text) - tail_size):]
 
-        rendered_texts = [render_message(m) for m in chunk_msgs if render_message(m)]
-        if not rendered_texts:
-            continue
+    overlap_text, _ = build_text_and_ranges(overlap_messages)
+    previous_chunk_text = slice_tail(overlap_text, OVERLAP_SIZE)
+    new_text, new_message_ranges = build_text_and_ranges(new_messages)
 
-        page_content = "\n---\n".join(rendered_texts)
+    for start in range(0, len(new_text), CHUNK_SIZE):
+        chunk_body = new_text[start : start + CHUNK_SIZE]
+        if not chunk_body: continue
+
+        # Correct ID mapping for this specific chunk window
+        chunk_body_ids = [
+            mid for m_start, m_end, mid in new_message_ranges
+            if m_end > start and m_start < start + len(chunk_body)
+        ]
         
-        # Meta-boosting for Sparse: add keywords and mentions
-        mentions = []
-        for m in chunk_msgs:
-            if m.mentions:
-                mentions.extend(m.mentions)
-        
-        sparse_extra = " ".join(list(set(mentions)))
-        sparse_content = f"{page_content}\n{sparse_extra}"
+        chunk_text = previous_chunk_text
+        if chunk_text and chunk_body: chunk_text += "\n"
+        chunk_text += chunk_body
 
-        results.append(
+        result.append(
             IndexAPIItem(
-                page_content=page_content,
-                dense_content=page_content[:5000],
-                sparse_content=sparse_content[:5000],
-                message_ids=[m.id for m in chunk_msgs]
+                page_content=chunk_text,
+                dense_content=chunk_text[:MAX_CHARS],
+                sparse_content=chunk_text[:MAX_CHARS],
+                message_ids=list(dict.fromkeys(chunk_body_ids)) # Unique IDs
             )
         )
-    return results
+        previous_chunk_text = slice_tail(chunk_text, OVERLAP_SIZE)
+
+    return result
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+async def health(): return {"status": "ok"}
 
 @app.post("/index", response_model=IndexAPIResponse)
 async def index(payload: IndexAPIRequest) -> IndexAPIResponse:
-    chunks = build_chunks_enhanced(
-        payload.data.chat,
-        payload.data.overlap_messages,
-        payload.data.new_messages
-    )
-    return IndexAPIResponse(results=chunks)
+    return IndexAPIResponse(results=build_chunks(payload.data.overlap_messages, payload.data.new_messages))
 
 @lru_cache(maxsize=1)
 def get_sparse_model():
@@ -180,15 +168,7 @@ def get_sparse_model():
 
 def embed_sparse_texts(texts: list[str]) -> list[SparseVector]:
     model = get_sparse_model()
-    vectors = []
-    for item in model.embed(texts):
-        vectors.append(
-            SparseVector(
-                indices=item.indices.tolist(),
-                values=item.values.tolist()
-            )
-        )
-    return vectors
+    return [SparseVector(indices=item.indices.tolist(), values=item.values.tolist()) for item in model.embed(texts)]
 
 @app.post("/sparse_embedding")
 async def sparse_embedding(payload: SparseEmbeddingRequest):
