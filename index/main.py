@@ -1,6 +1,12 @@
 import logging
 import os
 import re
+import asyncio
+
+# FORCE OFFLINE MODE for VK environment
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["FASTEMBED_OFFLINE"] = "1"
+
 from functools import lru_cache
 from typing import Any
 import asyncio
@@ -70,8 +76,8 @@ class SparseVector(BaseModel):
 app = FastAPI(title="Index Service Enhanced", version="1.0.0")
 
 # --- Optimized Parameters ---
-CHUNK_SIZE = 3 # Small chunks = High Precision
-CHUNK_OVERLAP = 1
+CHUNK_SIZE = 8 # Balanced for real world recall
+CHUNK_OVERLAP = 3
 SPARSE_MODEL_NAME = "Qdrant/bm25"
 FASTEMBED_CACHE_PATH = "/models/fastembed"
 UVICORN_WORKERS = 8
@@ -147,8 +153,8 @@ def build_chunks_enhanced(
         results.append(
             IndexAPIItem(
                 page_content=page_content,
-                dense_content=page_content,
-                sparse_content=sparse_content,
+                dense_content=page_content[:5000],
+                sparse_content=sparse_content[:5000],
                 message_ids=[m.id for m in chunk_msgs]
             )
         )

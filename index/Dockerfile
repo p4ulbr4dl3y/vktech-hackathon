@@ -12,9 +12,11 @@ ENV PORT=8000
 ENV CHUNK_SIZE=10
 ENV FASTEMBED_CACHE_PATH=/models/fastembed
 ENV HF_HOME=/models/huggingface
-
 RUN mkdir -p /models/fastembed /models/huggingface
 RUN python -c "from fastembed import SparseTextEmbedding; SparseTextEmbedding(model_name='Qdrant/bm25')"
+
+ENV HF_HUB_OFFLINE=1
+ENV FASTEMBED_OFFLINE=1
 
 EXPOSE 8000
 

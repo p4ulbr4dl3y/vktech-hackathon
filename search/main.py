@@ -1,6 +1,11 @@
 import logging
 import os
 import asyncio
+
+# FORCE OFFLINE MODE for VK environment
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["FASTEMBED_OFFLINE"] = "1"
+
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any
@@ -32,11 +37,12 @@ QDRANT_SPARSE_VECTOR_NAME = os.getenv("QDRANT_SPARSE_VECTOR_NAME", "sparse")
 OPEN_API_LOGIN = os.getenv("OPEN_API_LOGIN")
 OPEN_API_PASSWORD = os.getenv("OPEN_API_PASSWORD")
 
-# Optimized retrieval limits
-DENSE_PREFETCH_K = 150
-SPARSE_PREFETCH_K = 150
-RETRIEVE_K = 100
-RERANK_LIMIT = 100
+# Optimized retrieval limits for VK Rate Limits
+DENSE_PREFETCH_K = 250
+SPARSE_PREFETCH_K = 250
+RETRIEVE_K = 200
+RERANK_LIMIT = 75 
+
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("search-service")
@@ -95,16 +101,16 @@ class QueryExpander:
     @staticmethod
     def build_sparse(q: Question) -> str:
         parts = [q.text]
-        # Massive boost for exact keywords and search_text
+        # Softened boost for general stability
         s_text = q.search_text or q.text
-        parts.extend([s_text] * 10) 
+        parts.extend([s_text] * 3) 
         if q.keywords:
             for kw in q.keywords:
-                parts.extend([kw] * 15)
+                parts.extend([kw] * 7)
         # Add names with high weight
         if q.entities and q.entities.names:
             for n in q.entities.names:
-                parts.extend([n] * 5)
+                parts.extend([n] * 4)
         return " ".join(parts)
 
     @staticmethod
@@ -181,13 +187,24 @@ async def embed_sparse(text: str) -> SparseVector:
 
 async def get_rerank_scores(client: httpx.AsyncClient, query: str, targets: list[str]) -> list[float]:
     if not targets: return []
-    resp = await client.post(
-        RERANKER_URL,
-        **get_upstream_request_kwargs(),
-        json={"model": RERANKER_MODEL, "text_1": query, "text_2": targets}
-    )
-    resp.raise_for_status()
-    return [float(s["score"]) for s in resp.json().get("data", [])]
+    for attempt in range(3):
+        try:
+            resp = await client.post(
+                RERANKER_URL,
+                **get_upstream_request_kwargs(),
+                json={"model": RERANKER_MODEL, "text_1": query, "text_2": targets}
+            )
+            if resp.status_code == 429:
+                wait = (attempt + 1) * 3
+                logger.warning(f"Rate limited (429). Waiting {wait}s...")
+                await asyncio.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return [float(s["score"]) for s in resp.json().get("data", [])]
+        except Exception as e:
+            if attempt == 2: raise e
+            await asyncio.sleep(1)
+    return []
 
 @app.post("/search", response_model=SearchAPIResponse)
 async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
@@ -200,9 +217,9 @@ async def search(payload: SearchAPIRequest) -> SearchAPIResponse:
     qdrant: AsyncQdrantClient = app.state.qdrant
 
     # 1. Expand Queries
-    dense_q = QueryExpander.build_dense(q)
-    sparse_q = QueryExpander.build_sparse(q)
-    rerank_q = QueryExpander.build_rerank(q)
+    dense_q = QueryExpander.build_dense(q)[:5000]
+    sparse_q = QueryExpander.build_sparse(q)[:5000]
+    rerank_q = QueryExpander.build_rerank(q)[:5000]
     search_filter = QueryExpander.build_filter(q)
 
     # 2. Parallel Embedding
