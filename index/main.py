@@ -84,10 +84,14 @@ SPARSE_MODEL_NAME = "Qdrant/bm25"
 UVICORN_WORKERS = 8
 
 def render_message(message: Message) -> str:
-    """Rich rendering including text, parts, mentions, and file names."""
+    """Rich rendering including text, parts, mentions, files and AUTHOR."""
     text_parts = []
     
-    # 1. Основной текст
+    # 1. Автор (скрытая метка для поиска)
+    if message.sender_id:
+        text_parts.append(f"author: {message.sender_id}")
+
+    # 2. Основной текст
     if message.text:
         text_parts.append(message.text)
         

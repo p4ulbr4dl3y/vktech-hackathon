@@ -34,11 +34,11 @@ QDRANT_SPARSE_VECTOR_NAME = os.getenv("QDRANT_SPARSE_VECTOR_NAME", "sparse")
 OPEN_API_LOGIN = os.getenv("OPEN_API_LOGIN")
 OPEN_API_PASSWORD = os.getenv("OPEN_API_PASSWORD")
 
-# Baseline limits
-DENSE_PREFETCH_K = 20
-SPARSE_PREFETCH_K = 50
-RETRIEVE_K = 30
-RERANK_LIMIT = 15 
+# OPTION V9: Final Balanced (Personalization + Optimal Limits)
+DENSE_PREFETCH_K = 100
+SPARSE_PREFETCH_K = 100
+RETRIEVE_K = 60
+RERANK_LIMIT = 25 
 MAX_CHARS = 5000 
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -136,13 +136,20 @@ async def health(): return {"status": "ok"}
 async def search(payload: SearchAPIRequest):
     q_data = payload.question if isinstance(payload.question, dict) else payload.question.dict()
     query = q_data.get("text", "").strip()
+    asker = q_data.get("asker", "").strip()
+    
     if not query: raise HTTPException(status_code=400, detail="Text required")
+
+    # Персонализация: добавляем автора в запрос для BM25
+    sparse_query = query
+    if asker:
+        sparse_query += f" {asker}"
 
     client: httpx.AsyncClient = app.state.http
     qdrant: AsyncQdrantClient = app.state.qdrant
 
     dense_vec = await embed_dense(client, query)
-    sparse_vec = await embed_sparse(query)
+    sparse_vec = await embed_sparse(sparse_query)
     
     response = await qdrant.query_points(
         collection_name=QDRANT_COLLECTION_NAME,
@@ -167,7 +174,8 @@ async def search(payload: SearchAPIRequest):
     rerank_targets = [p.payload.get("page_content", "") for p in rerank_candidates]
     scores = await get_rerank_scores(client, query, rerank_targets)
 
-    scored_points = sorted(zip(scores, rerank_candidates, strict=True), key=lambda x: x[0], reverse=True)
+    # Use len(scores) to avoid zip mismatch crash
+    scored_points = sorted(zip(scores, rerank_candidates[:len(scores)]), key=lambda x: x[0], reverse=True)
     
     final_message_ids = []
     seen_ids = set()
