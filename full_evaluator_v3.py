@@ -60,7 +60,7 @@ async def get_dense_embedding(text, client):
     return r.json()["data"][0]["embedding"]
 
 async def run_full_test():
-    data_path = "data/Go Nova.json"
+    data_path = "data/stress_test_500.json"
     with open(data_path, "r") as f: chat_data = json.load(f)
 
     async with httpx.AsyncClient() as client:

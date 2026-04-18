@@ -84,20 +84,42 @@ SPARSE_MODEL_NAME = "Qdrant/bm25"
 UVICORN_WORKERS = 8
 
 def render_message(message: Message) -> str:
-    """Rich rendering from our previous work."""
+    """Rich rendering including text, parts, mentions, and file names."""
     text_parts = []
+    
+    # 1. Основной текст
     if message.text:
         text_parts.append(message.text)
+        
+    # 2. Части сообщения (включая цитаты и пересылки)
     if message.parts:
         for part in message.parts:
             p_text = part.get("text")
-            if p_text: text_parts.append(p_text)
-    if isinstance(message.file_snippets, str) and message.file_snippets.startswith("["):
+            if p_text:
+                text_parts.append(p_text)
+                
+    # 3. Упоминания (Mentions) - критично для поиска людей
+    if message.mentions:
+        # Добавляем меншны как отдельные токены для Sparse поиска
+        mentions_str = " ".join([str(m) for m in message.mentions])
+        if mentions_str:
+            text_parts.append(f"mentions: {mentions_str}")
+
+    # 4. Файлы (file_snippets)
+    if message.file_snippets:
         try:
-            snippets = json.loads(message.file_snippets)
+            snippets = []
+            if isinstance(message.file_snippets, str) and message.file_snippets.startswith("["):
+                snippets = json.loads(message.file_snippets)
+            elif isinstance(message.file_snippets, list):
+                snippets = message.file_snippets
+                
             for s in snippets:
-                if s.get("name"): text_parts.append(f"Файл: {s['name']}")
-        except: pass
+                if isinstance(s, dict) and s.get("name"):
+                    text_parts.append(f"файл: {s['name']}")
+        except:
+            pass
+
     return "\n".join(text_parts).strip()
 
 def build_chunks(overlap_messages: list[Message], new_messages: list[Message]) -> list[IndexAPIItem]:
