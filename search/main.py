@@ -35,7 +35,7 @@ QDRANT_SPARSE_VECTOR_NAME = os.getenv("QDRANT_SPARSE_VECTOR_NAME", "sparse")
 OPEN_API_LOGIN = os.getenv("OPEN_API_LOGIN")
 OPEN_API_PASSWORD = os.getenv("OPEN_API_PASSWORD")
 
-# V20 ENSEMBLE LIMITS
+# V21 SUPER-ENSEMBLE LIMITS (Focused on Recall)
 DENSE_PREFETCH_K = 100
 SPARSE_PREFETCH_K = 100
 RETRIEVE_K = 60
@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
         await app.state.http.aclose()
         await app.state.qdrant.close()
 
-app = FastAPI(title="Search Service V20 Masterpiece", version="5.0.0", lifespan=lifespan)
+app = FastAPI(title="Search Service V21 Super-Ensemble", version="7.0.0", lifespan=lifespan)
 
 async def embed_dense(client: httpx.AsyncClient, text: str) -> list[float]:
     kwargs = get_upstream_request_kwargs()
@@ -127,6 +127,7 @@ async def search(payload: dict):
     q_data = payload.get("question", {})
     query = q_data.get("text", "").strip()
     search_text = q_data.get("search_text", "").strip() or query
+    hyde = q_data.get("hyde", [])
     asker = q_data.get("asker", "").strip()
     
     if not query: raise HTTPException(status_code=400, detail="Text required")
@@ -134,29 +135,42 @@ async def search(payload: dict):
     client: httpx.AsyncClient = app.state.http
     qdrant: AsyncQdrantClient = app.state.qdrant
 
-    # ENSEMBLE RETRIEVAL
-    # 1. Main Query
-    dense_vec = await embed_dense(client, query)
+    # V21 SUPER-ENSEMBLE RETRIEVAL (4 Paths)
+    # Path 1: Pure Dense
+    dense_vec_query = await embed_dense(client, query)
+    
+    # Path 2: HyDE Dense (Hypothetical Answer)
+    dense_vec_hyde = []
+    if hyde:
+        dense_vec_hyde = await embed_dense(client, hyde[0])
+
+    # Path 3: Personalized Sparse
     sparse_data = await embed_sparse(f"{query} {asker}")
     
-    # 2. Optimized search_text (Keyword heavy)
+    # Path 4: Optimized search_text Sparse
     sparse_optimized = await embed_sparse(search_text)
+
+    # Build Ensemble Prefetch
+    prefetches = [
+        models.Prefetch(query=dense_vec_query, using=QDRANT_DENSE_VECTOR_NAME, limit=DENSE_PREFETCH_K),
+        models.Prefetch(
+            query=models.SparseVector(indices=sparse_data["indices"], values=sparse_data["values"]),
+            using=QDRANT_SPARSE_VECTOR_NAME,
+            limit=SPARSE_PREFETCH_K,
+        ),
+        models.Prefetch(
+            query=models.SparseVector(indices=sparse_optimized["indices"], values=sparse_optimized["values"]),
+            using=QDRANT_SPARSE_VECTOR_NAME,
+            limit=SPARSE_PREFETCH_K,
+        )
+    ]
+    # Add HyDE if available
+    if dense_vec_hyde:
+        prefetches.append(models.Prefetch(query=dense_vec_hyde, using=QDRANT_DENSE_VECTOR_NAME, limit=DENSE_PREFETCH_K))
 
     response = await qdrant.query_points(
         collection_name=QDRANT_COLLECTION_NAME,
-        prefetch=[
-            models.Prefetch(query=dense_vec, using=QDRANT_DENSE_VECTOR_NAME, limit=DENSE_PREFETCH_K),
-            models.Prefetch(
-                query=models.SparseVector(indices=sparse_data["indices"], values=sparse_data["values"]),
-                using=QDRANT_SPARSE_VECTOR_NAME,
-                limit=SPARSE_PREFETCH_K,
-            ),
-            models.Prefetch(
-                query=models.SparseVector(indices=sparse_optimized["indices"], values=sparse_optimized["values"]),
-                using=QDRANT_SPARSE_VECTOR_NAME,
-                limit=SPARSE_PREFETCH_K,
-            ),
-        ],
+        prefetch=prefetches,
         query=models.FusionQuery(fusion=models.Fusion.RRF),
         limit=RETRIEVE_K,
         with_payload=True,
@@ -170,7 +184,7 @@ async def search(payload: dict):
     rerank_targets = [p.payload.get("page_content", "")[:MAX_CHARS] for p in rerank_candidates]
     scores = await get_rerank_scores(client, query, rerank_targets)
 
-    # V20 BOOSTING: Entities, Dates, Author
+    # Final Boosting & Collecting
     scored_points = []
     entities = q_data.get("entities", {})
     docs = entities.get("documents", [])
@@ -179,44 +193,30 @@ async def search(payload: dict):
     for i, p in enumerate(rerank_candidates[:len(scores)]):
         s = scores[i]
         page_content = p.payload.get("page_content", "")
-        
-        # 1. Entity Boost (Very strong for documents)
         if docs:
             for doc in docs:
-                if doc.lower() in page_content.lower():
-                    s *= 1.2
-                    break
-        
-        # 2. Time Boost
+                if doc.lower() in page_content.lower(): s *= 1.2; break
         if date_hints:
             for hint in date_hints:
-                if hint in page_content:
-                    s *= 1.15
-                    break
-
-        # 3. Author Boost
-        if asker and f"author: {asker}" in page_content:
-            s *= 1.1
-
+                if hint in page_content: s *= 1.15; break
+        if asker and f"author: {asker}" in page_content: s *= 1.1
         scored_points.append((s, p))
 
     scored_points = sorted(scored_points, key=lambda x: x[0], reverse=True)
     
-    # COLLECT RESULT (Expert ID Sharpener Pass)
     final_message_ids = []
     seen_ids = set()
     
-    # PASS 1: Diverse Top Leaders (Top-2 per chunk from Top-10 chunks)
+    # PASS 1: Diverse Leaders
     for _, point in scored_points[:10]:
         meta = point.payload.get("metadata") or point.payload
         m_ids = meta.get("message_ids", [])
         for mid in m_ids[:2]:
             smid = str(mid)
             if smid not in seen_ids:
-                final_message_ids.append(smid)
-                seen_ids.add(smid)
+                final_message_ids.append(smid); seen_ids.add(smid)
 
-    # PASS 2: All IDs
+    # PASS 2: Recall Fill
     all_points = [p for _, p in scored_points] + points[len(scored_points):]
     for p in all_points:
         meta = p.payload.get("metadata") or p.payload
@@ -224,16 +224,10 @@ async def search(payload: dict):
         for mid in m_ids:
             smid = str(mid)
             if smid not in seen_ids:
-                final_message_ids.append(smid)
-                seen_ids.add(smid)
+                final_message_ids.append(smid); seen_ids.add(smid)
         if len(final_message_ids) >= 50: break
 
     return SearchAPIResponse(results=[SearchAPIItem(message_ids=final_message_ids[:50])])
-
-@app.exception_handler(Exception)
-async def exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception(exc)
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 if __name__ == "__main__":
     import uvicorn
