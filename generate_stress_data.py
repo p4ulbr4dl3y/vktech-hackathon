@@ -2,8 +2,8 @@ import json
 import os
 import random
 
-GOLDEN_DATA_PATH = "it-academy-hackathon-solution-example/data/Go Nova.json"
-OUTPUT_PATH = "it-academy-hackathon-solution-example/data/stress_test_500.json"
+GOLDEN_DATA_PATH = "data/Go Nova.json"
+OUTPUT_PATH = "data/stress_test_500.json"
 EXPECTED_GOLDEN_IDS = [
     "3666666666666666666", "3888888888888888888", "4111111111111111110", 
     "4222222222222222221", "4444444444444444444", "4555555555555555555", 

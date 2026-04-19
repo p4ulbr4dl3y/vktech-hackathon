@@ -1,7 +1,7 @@
 import json
 import os
 
-DATA_PATH = "it-academy-hackathon-solution-example/data/stress_test_500.json"
+DATA_PATH = "data/stress_test_500.json"
 EXPECTED_GOLDEN_IDS = [
     "3666666666666666666", "3888888888888888888", "4111111111111111110", 
     "4222222222222222221", "4444444444444444444", "4555555555555555555", 
