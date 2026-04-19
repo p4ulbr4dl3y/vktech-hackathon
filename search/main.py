@@ -34,7 +34,7 @@ QDRANT_SPARSE_VECTOR_NAME = os.getenv("QDRANT_SPARSE_VECTOR_NAME", "sparse")
 OPEN_API_LOGIN = os.getenv("OPEN_API_LOGIN")
 OPEN_API_PASSWORD = os.getenv("OPEN_API_PASSWORD")
 
-# V24 ALPHA-BLENDING LIMITS: Приоритизация семантики через глубину поиска
+# V23 ALPHA-BLENDING LIMITS: Приоритизация семантики через глубину поиска
 DENSE_LIMIT = 150
 HYDE_LIMIT = 120
 SPARSE_OPT_LIMIT = 100
