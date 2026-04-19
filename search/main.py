@@ -87,19 +87,24 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Search Service V8-Fixed", version="1.2.1", lifespan=lifespan)
 
 async def embed_dense(client: httpx.AsyncClient, text: str) -> list[float]:
-    # Use WORKING V7 logic for request
     kwargs = get_upstream_request_kwargs()
-    response = await client.post(
-        EMBEDDINGS_DENSE_URL,
-        **kwargs,
-        json={"model": EMBEDDINGS_DENSE_MODEL, "input": [text[:MAX_CHARS]]},
-    )
-    response.raise_for_status()
-    # Check both formats (baseline vs V7)
-    res_json = response.json()
-    if "data" in res_json:
-        return res_json["data"][0]["embedding"]
-    return res_json["embedding"]
+    for attempt in range(3):
+        try:
+            response = await client.post(
+                EMBEDDINGS_DENSE_URL,
+                **kwargs,
+                json={"model": EMBEDDINGS_DENSE_MODEL, "input": [text[:MAX_CHARS]]},
+                timeout=120.0
+            )
+            response.raise_for_status()
+            res_json = response.json()
+            if "data" in res_json:
+                return res_json["data"][0]["embedding"]
+            return res_json["embedding"]
+        except (httpx.ConnectTimeout, httpx.ConnectError, httpx.ReadTimeout):
+            if attempt == 2: raise
+            await asyncio.sleep(2)
+    return []
 
 async def embed_sparse(text: str) -> SparseVector:
     vectors = list(get_sparse_model().embed([text[:MAX_CHARS]]))
@@ -175,7 +180,23 @@ async def search(payload: SearchAPIRequest):
     scores = await get_rerank_scores(client, query, rerank_targets)
 
     # Use len(scores) to avoid zip mismatch crash
-    scored_points = sorted(zip(scores, rerank_candidates[:len(scores)]), key=lambda x: x[0], reverse=True)
+    scored_points = []
+    date_hints = q_data.get("date_mentions", [])
+    for i, p in enumerate(rerank_candidates[:len(scores)]):
+        s = scores[i]
+        page_content = p.payload.get("page_content", "")
+        # 1. Author Boost (+10%)
+        if asker and f"author: {asker}" in page_content:
+            s *= 1.1
+        # 2. Date Boost (+15%)
+        if date_hints:
+            for hint in date_hints:
+                if hint in page_content:
+                    s *= 1.15
+                    break
+        scored_points.append((s, p))
+
+    scored_points = sorted(scored_points, key=lambda x: x[0], reverse=True)
     
     final_message_ids = []
     seen_ids = set()

@@ -3,6 +3,7 @@ import os
 import re
 import asyncio
 import json
+from datetime import datetime
 
 # FORCE OFFLINE MODE for VK environment
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -83,48 +84,25 @@ MAX_CHARS = 5000
 SPARSE_MODEL_NAME = "Qdrant/bm25"
 UVICORN_WORKERS = 8
 
-def render_message(message: Message) -> str:
-    """Rich rendering including text, parts, mentions, files and AUTHOR."""
-    text_parts = []
-    
-    # 1. Автор (скрытая метка для поиска)
-    if message.sender_id:
-        text_parts.append(f"author: {message.sender_id}")
-
-    # 2. Основной текст
-    if message.text:
-        text_parts.append(message.text)
-        
-    # 2. Части сообщения (включая цитаты и пересылки)
-    if message.parts:
-        for part in message.parts:
-            p_text = part.get("text")
-            if p_text:
-                text_parts.append(p_text)
-                
-    # 3. Упоминания (Mentions) - критично для поиска людей
-    if message.mentions:
-        # Добавляем меншны как отдельные токены для Sparse поиска
-        mentions_str = " ".join([str(m) for m in message.mentions])
-        if mentions_str:
-            text_parts.append(f"mentions: {mentions_str}")
-
-    # 4. Файлы (file_snippets)
-    if message.file_snippets:
+def render_rich(m: Message) -> str:
+    """Rich rendering with author and date anchors."""
+    parts = [f"author: {m.sender_id}"]
+    if m.time:
+        dt = datetime.fromtimestamp(m.time).strftime('%Y-%m-%d')
+        parts.append(f"date: {dt}")
+    if m.text: parts.append(m.text)
+    if m.parts:
+        for p in m.parts:
+            t = p.get("text")
+            if t: parts.append(t)
+    if m.file_snippets:
         try:
-            snippets = []
-            if isinstance(message.file_snippets, str) and message.file_snippets.startswith("["):
-                snippets = json.loads(message.file_snippets)
-            elif isinstance(message.file_snippets, list):
-                snippets = message.file_snippets
-                
+            fs = m.file_snippets
+            snippets = json.loads(fs) if isinstance(fs, str) else fs
             for s in snippets:
-                if isinstance(s, dict) and s.get("name"):
-                    text_parts.append(f"файл: {s['name']}")
-        except:
-            pass
-
-    return "\n".join(text_parts).strip()
+                if isinstance(s, dict) and s.get("name"): parts.append(f"файл: {s['name']}")
+        except: pass
+    return "\n".join(parts).strip()
 
 def build_chunks(overlap_messages: list[Message], new_messages: list[Message]) -> list[IndexAPIItem]:
     """Strict baseline-aligned character chunking with our rendering."""
@@ -135,7 +113,7 @@ def build_chunks(overlap_messages: list[Message], new_messages: list[Message]) -
         message_ranges: list[tuple[int, int, str]] = []
         position = 0
         for index, message in enumerate(messages):
-            text = render_message(message)
+            text = render_rich(message)
             if not text: continue
             if index > 0 and text_parts:
                 text_parts.append("\n")
