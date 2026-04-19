@@ -1,16 +1,14 @@
 import logging
 import os
-import re
 import asyncio
 import json
 from datetime import datetime
-
-# FORCE OFFLINE MODE for VK environment
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["FASTEMBED_OFFLINE"] = "1"
-
 from functools import lru_cache
 from typing import Any
+
+# FORCE OFFLINE MODE
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["FASTEMBED_OFFLINE"] = "1"
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -23,16 +21,6 @@ PORT = int(os.getenv("PORT", "8000"))
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("index-service")
 
-# --- Models from TZ ---
-class Chat(BaseModel):
-    id: str
-    name: str
-    sn: str
-    type: str
-    is_public: bool | None = None
-    members_count: int | None = None
-    members: list[dict[str, Any]] | None = None
-
 class Message(BaseModel):
     id: str
     thread_sn: str | None = None
@@ -42,19 +30,6 @@ class Message(BaseModel):
     file_snippets: str | list[dict[str, Any]] = ""
     parts: list[dict[str, Any]] | None = None
     mentions: list[str] | None = None
-    member_event: dict[str, Any] | None = None
-    is_system: bool
-    is_hidden: bool
-    is_forward: bool
-    is_quote: bool
-
-class ChatData(BaseModel):
-    chat: Chat
-    overlap_messages: list[Message]
-    new_messages: list[Message]
-
-class IndexAPIRequest(BaseModel):
-    data: ChatData
 
 class IndexAPIItem(BaseModel):
     page_content: str
@@ -65,36 +40,37 @@ class IndexAPIItem(BaseModel):
 class IndexAPIResponse(BaseModel):
     results: list[IndexAPIItem]
 
-class SparseEmbeddingRequest(BaseModel):
-    texts: list[str]
+app = FastAPI(title="Index Service V20 Masterpiece", version="5.0.0")
 
-class SparseVector(BaseModel):
-    indices: list[int]
-    values: list[float]
-
-class SparseEmbeddingResponse(BaseModel):
-    vectors: list[SparseVector]
-
-app = FastAPI(title="Index Service Balanced", version="1.1.0")
-
-# Parameters aligned with baseline for maximum precision
-CHUNK_SIZE = 512 
+# V20: Use 512-char chunks for speed (like V9) but with contextual tags
+CHUNK_SIZE = 512
 OVERLAP_SIZE = 128
 MAX_CHARS = 5000 
-SPARSE_MODEL_NAME = "Qdrant/bm25"
 UVICORN_WORKERS = 8
 
-def render_rich(m: Message) -> str:
-    """Rich rendering with author and date anchors."""
-    parts = [f"author: {m.sender_id}"]
+def render_v20(m: Message, chat_name: str, chat_type: str) -> str:
+    """Ultimate contextual rendering."""
+    parts = []
+    # 1. Chat Context (The 'Where')
+    parts.append(f"chat: {chat_name} type: {chat_type}")
+    
+    # 2. Author and Thread (The 'Who/How')
+    parts.append(f"author: {m.sender_id}")
+    if m.thread_sn:
+        parts.append(f"thread: {m.thread_sn}")
     if m.time:
         dt = datetime.fromtimestamp(m.time).strftime('%Y-%m-%d')
         parts.append(f"date: {dt}")
+    
+    # 3. Content
     if m.text: parts.append(m.text)
     if m.parts:
         for p in m.parts:
             t = p.get("text")
             if t: parts.append(t)
+    
+    # 4. Files and Mentions
+    if m.mentions: parts.append(f"mentions: {' '.join([str(x) for x in m.mentions])}")
     if m.file_snippets:
         try:
             fs = m.file_snippets
@@ -102,87 +78,78 @@ def render_rich(m: Message) -> str:
             for s in snippets:
                 if isinstance(s, dict) and s.get("name"): parts.append(f"файл: {s['name']}")
         except: pass
+        
     return "\n".join(parts).strip()
 
-def build_chunks(overlap_messages: list[Message], new_messages: list[Message]) -> list[IndexAPIItem]:
-    """Strict baseline-aligned character chunking with our rendering."""
-    result: list[IndexAPIItem] = []
+def build_chunks(overlap_messages: list[Message], new_messages: list[Message], chat_info: dict) -> list[IndexAPIItem]:
+    """Character-based chunking with V20 contextual rendering."""
+    chat_name = chat_info.get("name", "Unknown")
+    chat_type = chat_info.get("type", "Unknown")
+    
+    def get_text_data(messages):
+        full_text = ""
+        ranges = []
+        curr = 0
+        for m in messages:
+            txt = render_v20(m, chat_name, chat_type)
+            if not txt: continue
+            if full_text:
+                full_text += "\n\n"
+                curr += 2
+            start = curr
+            full_text += txt
+            curr += len(txt)
+            ranges.append((start, curr, m.id))
+        return full_text, ranges
 
-    def build_text_and_ranges(messages: list[Message]) -> tuple[str, list[tuple[int, int, str]]]:
-        text_parts: list[str] = []
-        message_ranges: list[tuple[int, int, str]] = []
-        position = 0
-        for index, message in enumerate(messages):
-            text = render_rich(message)
-            if not text: continue
-            if index > 0 and text_parts:
-                text_parts.append("\n")
-                position += 1
-            start = position
-            text_parts.append(text)
-            position += len(text)
-            message_ranges.append((start, position, message.id))
-        return "".join(text_parts), message_ranges
-
-    def slice_tail(text: str, tail_size: int) -> str:
-        if tail_size <= 0: return ""
-        return text[max(0, len(text) - tail_size):]
-
-    overlap_text, _ = build_text_and_ranges(overlap_messages)
-    previous_chunk_text = slice_tail(overlap_text, OVERLAP_SIZE)
-    new_text, new_message_ranges = build_text_and_ranges(new_messages)
-
-    for start in range(0, len(new_text), CHUNK_SIZE):
-        chunk_body = new_text[start : start + CHUNK_SIZE]
-        if not chunk_body: continue
-
-        # Correct ID mapping for this specific chunk window
-        chunk_body_ids = [
-            mid for m_start, m_end, mid in new_message_ranges
-            if m_end > start and m_start < start + len(chunk_body)
-        ]
+    all_text, all_ranges = get_text_data(overlap_messages + new_messages)
+    new_text, _ = get_text_data(new_messages)
+    
+    if not new_text: return []
+    
+    start_offset = len(all_text) - len(new_text)
+    results = []
+    
+    for start in range(start_offset, len(all_text), CHUNK_SIZE - OVERLAP_SIZE):
+        end = start + CHUNK_SIZE
+        chunk_txt = all_text[start:end]
+        if not chunk_txt: continue
         
-        chunk_text = previous_chunk_text
-        if chunk_text and chunk_body: chunk_text += "\n"
-        chunk_text += chunk_body
-
-        result.append(
-            IndexAPIItem(
-                page_content=chunk_text,
-                dense_content=chunk_text[:MAX_CHARS],
-                sparse_content=chunk_text[:MAX_CHARS],
-                message_ids=list(dict.fromkeys(chunk_body_ids)) # Unique IDs
-            )
-        )
-        previous_chunk_text = slice_tail(chunk_text, OVERLAP_SIZE)
-
-    return result
+        chunk_ids = [mid for s, e, mid in all_ranges if e > start and s < end]
+        if not chunk_ids: continue
+        
+        results.append(IndexAPIItem(
+            page_content=chunk_txt,
+            dense_content=chunk_txt[:MAX_CHARS],
+            sparse_content=chunk_txt[:MAX_CHARS],
+            message_ids=list(dict.fromkeys(chunk_ids))
+        ))
+        if end >= len(all_text): break
+    return results
 
 @app.get("/health")
 async def health(): return {"status": "ok"}
 
 @app.post("/index", response_model=IndexAPIResponse)
-async def index(payload: IndexAPIRequest) -> IndexAPIResponse:
-    return IndexAPIResponse(results=build_chunks(payload.data.overlap_messages, payload.data.new_messages))
+async def index(payload: dict):
+    data = payload.get("data", {})
+    chat = data.get("chat", {})
+    overlap = [Message(**m) for m in data.get("overlap_messages", [])]
+    new_msgs = [Message(**m) for m in data.get("new_messages", [])]
+    return IndexAPIResponse(results=build_chunks(overlap, new_msgs, chat))
 
 @lru_cache(maxsize=1)
 def get_sparse_model():
     from fastembed import SparseTextEmbedding
-    return SparseTextEmbedding(model_name=SPARSE_MODEL_NAME)
-
-def embed_sparse_texts(texts: list[str]) -> list[SparseVector]:
-    model = get_sparse_model()
-    return [SparseVector(indices=item.indices.tolist(), values=item.values.tolist()) for item in model.embed(texts)]
+    return SparseTextEmbedding(model_name="Qdrant/bm25")
 
 @app.post("/sparse_embedding")
-async def sparse_embedding(payload: SparseEmbeddingRequest):
-    vectors = await asyncio.to_thread(embed_sparse_texts, payload.texts)
+async def sparse_embedding(payload: dict):
+    model = get_sparse_model()
+    vectors = []
+    for item in model.embed(payload.get("texts", [])):
+        vectors.append({"indices": item.indices.tolist(), "values": item.values.tolist()})
     return {"vectors": vectors}
-
-@app.exception_handler(Exception)
-async def exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception(exc)
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 if __name__ == "__main__":
     import uvicorn
