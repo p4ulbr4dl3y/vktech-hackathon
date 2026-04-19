@@ -1,6 +1,6 @@
 # Gemini Context: VK Workspace Message Search (Hackathon Solution)
 
-This repository contains a record-breaking RAG (Retrieval-Augmented Generation) solution for the VK Tech Hackathon 2026. The system is designed for high-precision search across fragmented messenger data in an air-gapped corporate environment.
+This repository contains a high-performance RAG (Retrieval-Augmented Generation) solution for the VK Tech Hackathon 2026. The system is designed for high-precision search across fragmented messenger data in an air-gapped corporate environment.
 
 ## 🏗 System Architecture
 
@@ -46,7 +46,7 @@ The solution implements a two-stage retrieval pipeline with a "Super-Ensemble" o
 ## 📝 Development Conventions
 - **Contract Integrity**: Strictly adhere to schemas defined in `SPECIFICATION.md`. Never change `/index`, `/search`, or `/sparse_embedding` signatures.
 - **Offline First**: All models and libraries MUST work without internet access. Ensure `HF_HUB_OFFLINE=1` is respected.
-- **Performance**: Target latency is < 60s per query. The "Masterpiece" configuration uses `DENSE_LIMIT=150` and `RERANK_LIMIT=35` as optimal performance/quality trade-offs.
+- **Performance**: Target latency is < 60s per query. The "Optimized" configuration uses `DENSE_LIMIT=150` and `RERANK_LIMIT=35` as optimal performance/quality trade-offs.
 - **Logging**: Use `LOG_LEVEL=INFO` for production-grade tracing of the retrieval pipeline.
 
 ## 📂 Project Structure
