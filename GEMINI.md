@@ -1,58 +1,55 @@
-# Gemini Context: VK Workspace Message Search (Hackathon Solution)
+# Контекст проекта: Система интеллектуального поиска VK Workspace
 
-This repository contains a high-performance RAG (Retrieval-Augmented Generation) solution for the VK Tech Hackathon 2026. The system is designed for high-precision search across fragmented messenger data in an air-gapped corporate environment.
+Данный файл содержит инструкции и архитектурное описание для работы с решением RAG-поиска по сообщениям.
 
-## 🏗 System Architecture
+## 🏗 Обзор системы
+Решение представляет собой двухстадийный пайплайн поиска (Retrieval & Reranking), оптимизированный для работы в закрытом корпоративном контуре (air-gap).
 
-The solution implements a two-stage retrieval pipeline with a "Super-Ensemble" of search strategies:
-
-1.  **Indexing Service (`index/`)**:
-    *   **Enrichment**: Messages are rendered into structured text with semantic anchors (`chat:`, `author:`, `date:`, `file:`, `thread:`).
-    *   **Chunking**: Uses a sliding window (default: 512 chars with 128 overlap) to maintain conversational context.
-    *   **Sparse Vectors**: Generates BM25 embeddings locally using `fastembed`.
-    *   **Security**: Operates in `OFFLINE` mode to satisfy air-gap requirements.
-
+### Основные компоненты:
+1.  **Index Service (`index/`)**:
+    *   **Обогащение**: Функция `render_v20` добавляет в текст метаданные (автор, чат, дата, файлы) как семантические якоря.
+    *   **Чанкирование**: Символьное скользящее окно (CHUNK_SIZE=512, OVERLAP=128).
+    *   **Разреженные векторы**: Локальная генерация BM25 через `fastembed`.
 2.  **Search Service (`search/`)**:
-    *   **Alpha-Blending Ensemble**: Parallel retrieval using Dense (original query + HyDE) and Sparse (query + optimized search text) vectors.
-    *   **Fusion**: Results are combined using **RRF (Reciprocal Rank Fusion)** in Qdrant.
-    *   **Cross-Encoder Reranking**: The top 35 candidates are reranked using the `Llama-Nemotron-Reranker-1B` model.
-    *   **Heuristic Boosting**: Final scores are boosted based on entity matching (documents, dates) and author relevance.
-    *   **Diversification**: Selection logic ensures the top 50 results represent the most relevant messages without redundant overlap.
+    *   **Super-Ensemble (V24)**: Параллельный префетч по 5 каналам:
+        - Dense (оригинальный запрос)
+        - HyDE (гипотетический ответ)
+        - Variants (переформулировки запроса) — **новое в V24**
+        - Sparse Main (запрос + автор)
+        - Sparse Optimized (нормализованный текст)
+    *   **Fusion**: Слияние результатов через RRF (Reciprocal Rank Fusion) в Qdrant.
+    *   **Reranking**: Кросс-энкодер `Llama-Nemotron-Reranker-1B` для 35 лучших кандидатов.
+    *   **Heuristic Boosting**: Дополнительное усиление весов при совпадении сущностей (документы, даты) и автора.
+3.  **Хранилище**: Qdrant (v1.14.1) с раздельной конфигурацией плотных (1024, Cosine) и разреженных векторов.
 
-3.  **Inference & Storage**:
-    *   **Qdrant**: Vector database for dense and sparse retrieval.
-    *   **External APIs**: Dense embeddings (`Qwen3-Embedding`) and Reranking are provided via external HTTP endpoints during evaluation.
+## 🚀 Команды управления
 
-## 🚀 Key Commands
+### Сборка и запуск
+```bash
+# Запуск всей инфраструктуры (Qdrant, Index, Search)
+docker-compose up --build
 
-### Deployment
-- **Start Services**: `docker-compose up --build`
-  - Index Service: `http://localhost:8001`
-  - Search Service: `http://localhost:8002`
-  - Qdrant: `http://localhost:6333`
+# Остановка сервисов
+docker-compose down
+```
 
-### Development & Testing
-- **Generate Synthetic Data**: `python generate_stress_data.py`
-- **Verify Data**: `python verify_stress_data.py`
-- **Full Evaluation**: `python full_evaluator_v3.py` (Calculates Recall@50 and nDCG@50).
+### Разработка и тестирование
+*   **Индексация**: `POST http://localhost:8001/index`
+*   **Поиск**: `POST http://localhost:8002/search`
+*   **Валидация**: `python full_evaluator_v3.py` — основной скрипт для расчета Recall@50 и nDCG@50.
+*   **Генерация данных**: `python generate_stress_data.py`
 
-## 🛠 Technology Stack
-- **Framework**: FastAPI (Python 3.12+)
-- **Vector DB**: Qdrant 1.14.1
-- **NLP/Embeddings**: `fastembed` (BM25), `httpx` (Async API calls)
-- **Validation**: Pydantic v2
-- **Server**: Uvicorn (multi-worker configuration)
+## 🛠 Конвенции разработки
+*   **Сетевая изоляция**: Параметры `HF_HUB_OFFLINE=1` и `FASTEMBED_OFFLINE=1` обязательны. Все модели должны быть упакованы в образ или загружены локально.
+*   **Контракты API**: Строгое соблюдение схем, описанных в `SPECIFICATION.md`.
+*   **Производительность**:
+    - Лимит реранжирования (`RERANK_LIMIT`) — 35.
+    - Лимит выдачи — строго 50 `message_ids`.
+    - SLA на поиск — менее 60 секунд.
+*   **Логирование**: Использовать `LOG_LEVEL=INFO` для отслеживания этапов `Retrieve`, `Rank` и `Finalize`.
 
-## 📝 Development Conventions
-- **Contract Integrity**: Strictly adhere to schemas defined in `SPECIFICATION.md`. Never change `/index`, `/search`, or `/sparse_embedding` signatures.
-- **Offline First**: All models and libraries MUST work without internet access. Ensure `HF_HUB_OFFLINE=1` is respected.
-- **Performance**: Target latency is < 60s per query. The "Optimized" configuration uses `DENSE_LIMIT=150` and `RERANK_LIMIT=35` as optimal performance/quality trade-offs.
-- **Logging**: Use `LOG_LEVEL=INFO` for production-grade tracing of the retrieval pipeline.
-
-## 📂 Project Structure
-- `index/`: Indexing microservice.
-- `search/`: Search microservice (retrieval & reranking logic).
-- `data/`: Sample datasets and ground-truth questions.
-- `full_evaluator_v3.py`: The primary metric validation script.
-- `SPECIFICATION.md`: Detailed technical requirements and API documentation.
-- `CHRONOLOGY.md`: History of score improvements (from 0.46 to 0.6014).
+## 📂 Ключевые файлы
+- `index/main.py`: Логика формирования контента и чанкинга.
+- `search/main.py`: Конфигурация ансамбля и весов Alpha-Blending (версия V24).
+- `SPECIFICATION.md`: Полное техническое задание и описание схем.
+- `CHRONOLOGY.md`: История улучшений и рекордов точности.
