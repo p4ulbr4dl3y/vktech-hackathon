@@ -37,6 +37,7 @@ OPEN_API_PASSWORD = os.getenv("OPEN_API_PASSWORD")
 # V23 ALPHA-BLENDING LIMITS: Приоритизация семантики через глубину поиска
 DENSE_LIMIT = 150
 HYDE_LIMIT = 120
+VARIANTS_LIMIT = 120
 SPARSE_OPT_LIMIT = 100
 SPARSE_MAIN_LIMIT = 60
 RETRIEVE_K = 80
@@ -138,6 +139,7 @@ async def search(payload: dict) -> SearchAPIResponse:
     query = q_data.get("text", "").strip()
     search_text = q_data.get("search_text", "").strip() or query
     hyde = q_data.get("hyde", [])
+    variants = q_data.get("variants", [])
     asker = q_data.get("asker", "").strip()
     
     if not query: raise HTTPException(status_code=400, detail="Text required")
@@ -149,7 +151,8 @@ async def search(payload: dict) -> SearchAPIResponse:
     t_retr_start = time.perf_counter()
     dense_task = embed_dense(client, query)
     hyde_task = embed_dense(client, hyde[0]) if hyde else asyncio.sleep(0, [])
-    dense_vec, hyde_vec = await asyncio.gather(dense_task, hyde_task)
+    var_task = embed_dense(client, variants[0]) if variants else asyncio.sleep(0, [])
+    dense_vec, hyde_vec, var_vec = await asyncio.gather(dense_task, hyde_task, var_task)
     
     sparse_main = await embed_sparse(f"{query} {asker}")
     sparse_opt = await embed_sparse(search_text)
@@ -161,6 +164,8 @@ async def search(payload: dict) -> SearchAPIResponse:
     ]
     if hyde_vec:
         prefetches.append(models.Prefetch(query=hyde_vec, using=QDRANT_DENSE_VECTOR_NAME, limit=HYDE_LIMIT))
+    if var_vec:
+        prefetches.append(models.Prefetch(query=var_vec, using=QDRANT_DENSE_VECTOR_NAME, limit=VARIANTS_LIMIT))
 
     response = await qdrant.query_points(
         collection_name=QDRANT_COLLECTION_NAME,
