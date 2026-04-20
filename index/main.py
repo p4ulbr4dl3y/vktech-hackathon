@@ -24,6 +24,7 @@ logger = logging.getLogger("index-service")
 
 class Message(BaseModel):
     """Модель сообщения из входного потока данных."""
+
     id: str
     thread_sn: str | None = None
     time: int
@@ -36,6 +37,7 @@ class Message(BaseModel):
 
 class IndexAPIItem(BaseModel):
     """Модель выходного чанка для сохранения в Qdrant."""
+
     page_content: str
     dense_content: str
     sparse_content: str
@@ -44,16 +46,17 @@ class IndexAPIItem(BaseModel):
 
 class IndexAPIResponse(BaseModel):
     """Модель ответа сервиса индексации."""
+
     results: list[IndexAPIItem]
 
 
 app = FastAPI(title="VK Search Indexer", version="5.1.0")
 
 # Настройки сегментации текста
-CHUNK_SIZE = 512       # Целевой размер чанка в символах
-OVERLAP_SIZE = 128     # Размер перекрытия между чанками
-MAX_CHARS = 5000       # Максимальная длина текста для API эмбеддингов
-UVICORN_WORKERS = 8    # Количество воркеров сервера
+CHUNK_SIZE = 512  # Целевой размер чанка в символах
+OVERLAP_SIZE = 128  # Размер перекрытия между чанками
+MAX_CHARS = 5000  # Максимальная длина текста для API эмбеддингов
+UVICORN_WORKERS = 8  # Количество воркеров сервера
 
 
 def render_v20(m: Message, chat_name: str, chat_type: str) -> str:
@@ -108,7 +111,9 @@ def build_chunks(
     chat_name = chat_info.get("name", "Unknown")
     chat_type = chat_info.get("type", "Unknown")
 
-    def get_text_data(messages: List[Message]) -> Tuple[str, List[Tuple[int, int, str]]]:
+    def get_text_data(
+        messages: List[Message],
+    ) -> Tuple[str, List[Tuple[int, int, str]]]:
         """Собирает полный текст из списка сообщений и фиксирует границы каждого ID."""
         full_text = ""
         ranges = []
@@ -191,7 +196,9 @@ async def sparse_embedding(payload: dict) -> dict[str, Any]:
     model = get_sparse_model()
     vectors = []
     for item in model.embed(payload.get("texts", [])):
-        vectors.append({"indices": item.indices.tolist(), "values": item.values.tolist()})
+        vectors.append(
+            {"indices": item.indices.tolist(), "values": item.values.tolist()}
+        )
     return {"vectors": vectors}
 
 

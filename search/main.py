@@ -12,8 +12,8 @@ os.environ["FASTEMBED_OFFLINE"] = "1"
 
 import httpx
 import uvicorn
-from fastembed import SparseTextEmbedding
 from fastapi import FastAPI, HTTPException
+from fastembed import SparseTextEmbedding
 from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient, models
 
@@ -46,6 +46,7 @@ MAX_CHARS = 5000
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("search-service")
 
+
 def get_auth_kwargs() -> dict[str, Any]:
     """Формирование параметров авторизации."""
     headers = {"Content-Type": "application/json"}
@@ -56,18 +57,24 @@ def get_auth_kwargs() -> dict[str, Any]:
         headers["Authorization"] = f"Bearer {API_KEY}"
     return kwargs
 
+
 class SearchAPIItem(BaseModel):
     """Модель элемента поисковой выдачи."""
+
     message_ids: list[str]
+
 
 class SearchAPIResponse(BaseModel):
     """Модель ответа поискового сервиса."""
+
     results: list[SearchAPIItem]
+
 
 @lru_cache(maxsize=1)
 def get_sparse_model() -> SparseTextEmbedding:
     """Инициализация модели разреженных эмбеддингов BM25."""
     return SparseTextEmbedding(model_name="Qdrant/bm25")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -80,7 +87,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await app.state.http.aclose()
         await app.state.qdrant.close()
 
+
 app = FastAPI(title="VK Search Engine V23", version="9.0.0", lifespan=lifespan)
+
 
 async def embed_dense(client: httpx.AsyncClient, text: str) -> list[float]:
     """Получение плотных эмбеддингов через внешний API с механизмом повторов."""
@@ -88,9 +97,10 @@ async def embed_dense(client: httpx.AsyncClient, text: str) -> list[float]:
     for attempt in range(5):
         try:
             response = await client.post(
-                EMBEDDINGS_DENSE_URL, **kwargs,
+                EMBEDDINGS_DENSE_URL,
+                **kwargs,
                 json={"model": EMBEDDINGS_DENSE_MODEL, "input": [text[:MAX_CHARS]]},
-                timeout=120.0
+                timeout=120.0,
             )
             if response.status_code == 502:
                 logger.warning(f"Embedding API 502 (attempt {attempt+1}). Retrying...")
@@ -98,14 +108,17 @@ async def embed_dense(client: httpx.AsyncClient, text: str) -> list[float]:
                 continue
             response.raise_for_status()
             res_json = response.json()
-            if "data" in res_json: return res_json["data"][0]["embedding"]
+            if "data" in res_json:
+                return res_json["data"][0]["embedding"]
             return res_json["embedding"]
         except Exception as e:
-            if attempt == 4: raise
+            if attempt == 4:
+                raise
             delay = (2**attempt) + 1
             logger.warning(f"Embedding API failed ({e}). Retrying in {delay}s...")
             await asyncio.sleep(delay)
     return []
+
 
 async def embed_sparse(text: str) -> dict[str, Any]:
     """Локальная генерация разреженных векторов (BM25)."""
@@ -113,32 +126,45 @@ async def embed_sparse(text: str) -> dict[str, Any]:
     item = vectors[0]
     return {"indices": item.indices.tolist(), "values": item.values.tolist()}
 
-async def get_rerank_scores(client: httpx.AsyncClient, query: str, targets: list[str]) -> list[float]:
+
+async def get_rerank_scores(
+    client: httpx.AsyncClient, query: str, targets: list[str]
+) -> list[float]:
     """Получение оценок релевантности от кросс-энкодера."""
-    if not targets: return []
+    if not targets:
+        return []
     kwargs = get_auth_kwargs()
     for attempt in range(3):
         try:
             response = await client.post(
-                RERANKER_URL, **kwargs,
-                json={"model": RERANKER_MODEL, "text_1": query[:MAX_CHARS], "text_2": targets},
-                timeout=60.0
+                RERANKER_URL,
+                **kwargs,
+                json={
+                    "model": RERANKER_MODEL,
+                    "text_1": query[:MAX_CHARS],
+                    "text_2": targets,
+                },
+                timeout=60.0,
             )
             if response.status_code == 429:
-                await asyncio.sleep((attempt + 1) * 3); continue
+                await asyncio.sleep((attempt + 1) * 3)
+                continue
             response.raise_for_status()
             res_json = response.json()
             data = res_json["data"] if "data" in res_json else res_json
             return [float(s["score"]) for s in data]
         except Exception:
-            if attempt == 2: raise
+            if attempt == 2:
+                raise
             await asyncio.sleep(1)
     return []
+
 
 @app.get("/health")
 async def health() -> dict[str, str]:
     """Проверка доступности сервиса."""
     return {"status": "ok"}
+
 
 @app.post("/search", response_model=SearchAPIResponse)
 async def search(payload: dict) -> SearchAPIResponse:
@@ -152,8 +178,9 @@ async def search(payload: dict) -> SearchAPIResponse:
     search_text = q_data.get("search_text", "").strip() or query
     hyde = q_data.get("hyde", [])
     asker = q_data.get("asker", "").strip()
-    
-    if not query: raise HTTPException(status_code=400, detail="Text required")
+
+    if not query:
+        raise HTTPException(status_code=400, detail="Text required")
 
     client: httpx.AsyncClient = app.state.http
     qdrant: AsyncQdrantClient = app.state.qdrant
@@ -163,17 +190,31 @@ async def search(payload: dict) -> SearchAPIResponse:
     dense_task = embed_dense(client, query)
     hyde_task = embed_dense(client, hyde[0]) if hyde else asyncio.sleep(0, [])
     dense_vec, hyde_vec = await asyncio.gather(dense_task, hyde_task)
-    
+
     sparse_main = await embed_sparse(f"{query} {asker}")
     sparse_opt = await embed_sparse(search_text)
 
     prefetches = [
-        models.Prefetch(query=dense_vec, using=QDRANT_DENSE_VECTOR_NAME, limit=DENSE_LIMIT),
-        models.Prefetch(query=models.SparseVector(**sparse_main), using=QDRANT_SPARSE_VECTOR_NAME, limit=SPARSE_MAIN_LIMIT),
-        models.Prefetch(query=models.SparseVector(**sparse_opt), using=QDRANT_SPARSE_VECTOR_NAME, limit=SPARSE_OPT_LIMIT),
+        models.Prefetch(
+            query=dense_vec, using=QDRANT_DENSE_VECTOR_NAME, limit=DENSE_LIMIT
+        ),
+        models.Prefetch(
+            query=models.SparseVector(**sparse_main),
+            using=QDRANT_SPARSE_VECTOR_NAME,
+            limit=SPARSE_MAIN_LIMIT,
+        ),
+        models.Prefetch(
+            query=models.SparseVector(**sparse_opt),
+            using=QDRANT_SPARSE_VECTOR_NAME,
+            limit=SPARSE_OPT_LIMIT,
+        ),
     ]
     if hyde_vec:
-        prefetches.append(models.Prefetch(query=hyde_vec, using=QDRANT_DENSE_VECTOR_NAME, limit=HYDE_LIMIT))
+        prefetches.append(
+            models.Prefetch(
+                query=hyde_vec, using=QDRANT_DENSE_VECTOR_NAME, limit=HYDE_LIMIT
+            )
+        )
 
     response = await qdrant.query_points(
         collection_name=QDRANT_COLLECTION_NAME,
@@ -184,29 +225,37 @@ async def search(payload: dict) -> SearchAPIResponse:
     )
     t_retr = time.perf_counter() - t_retr_start
 
-    if not response.points: return SearchAPIResponse(results=[SearchAPIItem(message_ids=[])])
+    if not response.points:
+        return SearchAPIResponse(results=[SearchAPIItem(message_ids=[])])
 
     # ЭТАП 2: Реранкинг
     t_rank_start = time.perf_counter()
     points = response.points
     candidates = points[:RERANK_LIMIT]
-    scores = await get_rerank_scores(client, query, [p.payload.get("page_content", "")[:MAX_CHARS] for p in candidates])
+    scores = await get_rerank_scores(
+        client,
+        query,
+        [p.payload.get("page_content", "")[:MAX_CHARS] for p in candidates],
+    )
 
     scored = []
     docs = q_data.get("entities", {}).get("documents", [])
     dates = q_data.get("date_mentions", [])
 
-    for i, p in enumerate(candidates[:len(scores)]):
+    for i, p in enumerate(candidates[: len(scores)]):
         s = scores[i]
         text = str(p.payload.get("page_content", "")).lower()
-        if docs and any(str(d).lower() in text for d in docs): s *= 1.2
-        if dates and any(str(d) in text for d in dates): s *= 1.15
-        if asker and f"author: {asker}" in text: s *= 1.1
+        if docs and any(str(d).lower() in text for d in docs):
+            s *= 1.2
+        if dates and any(str(d) in text for d in dates):
+            s *= 1.15
+        if asker and f"author: {asker}" in text:
+            s *= 1.1
         scored.append((s, p))
 
     scored = sorted(scored, key=lambda x: x[0], reverse=True)
     t_rank = time.perf_counter() - t_rank_start
-    
+
     # ЭТАП 3: Формирование финальной выдачи
     final_ids: list[str] = []
     seen: set[str] = set()
@@ -215,20 +264,26 @@ async def search(payload: dict) -> SearchAPIResponse:
         m_ids = meta.get("message_ids", [])
         for mid in m_ids[:2]:
             smid = str(mid)
-            if smid not in seen: final_ids.append(smid); seen.add(smid)
+            if smid not in seen:
+                final_ids.append(smid)
+                seen.add(smid)
 
-    all_points_seq = [s[1] for s in scored] + points[len(scored):]
+    all_points_seq = [s[1] for s in scored] + points[len(scored) :]
     for p in all_points_seq:
         meta = p.payload.get("metadata") or p.payload
         m_ids = meta.get("message_ids", [])
         for mid in m_ids:
             smid = str(mid)
-            if smid not in seen: final_ids.append(smid); seen.add(smid)
-        if len(final_ids) >= 50: break
+            if smid not in seen:
+                final_ids.append(smid)
+                seen.add(smid)
+        if len(final_ids) >= 50:
+            break
 
     latency = time.perf_counter() - start_time
     logger.info(f"Search Finished (V23): latency={latency:.3f}s")
     return SearchAPIResponse(results=[SearchAPIItem(message_ids=final_ids[:50])])
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host=HOST, port=PORT)
