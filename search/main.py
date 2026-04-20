@@ -57,17 +57,21 @@ def get_auth_kwargs() -> dict[str, Any]:
     return kwargs
 
 class SearchAPIItem(BaseModel):
+    """Модель элемента поисковой выдачи."""
     message_ids: list[str]
 
 class SearchAPIResponse(BaseModel):
+    """Модель ответа поискового сервиса."""
     results: list[SearchAPIItem]
 
 @lru_cache(maxsize=1)
 def get_sparse_model() -> SparseTextEmbedding:
+    """Инициализация модели разреженных эмбеддингов BM25."""
     return SparseTextEmbedding(model_name="Qdrant/bm25")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Управление жизненным циклом приложения: инициализация и закрытие клиентов."""
     app.state.http = httpx.AsyncClient(timeout=120.0)
     app.state.qdrant = AsyncQdrantClient(url=QDRANT_URL, api_key=API_KEY)
     try:
@@ -79,6 +83,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(title="VK Search Engine V23", version="9.0.0", lifespan=lifespan)
 
 async def embed_dense(client: httpx.AsyncClient, text: str) -> list[float]:
+    """Получение плотных эмбеддингов через внешний API с механизмом повторов."""
     kwargs = get_auth_kwargs()
     for attempt in range(5):
         try:
@@ -103,11 +108,13 @@ async def embed_dense(client: httpx.AsyncClient, text: str) -> list[float]:
     return []
 
 async def embed_sparse(text: str) -> dict[str, Any]:
+    """Локальная генерация разреженных векторов (BM25)."""
     vectors = list(get_sparse_model().embed([text[:MAX_CHARS]]))
     item = vectors[0]
     return {"indices": item.indices.tolist(), "values": item.values.tolist()}
 
 async def get_rerank_scores(client: httpx.AsyncClient, query: str, targets: list[str]) -> list[float]:
+    """Получение оценок релевантности от кросс-энкодера."""
     if not targets: return []
     kwargs = get_auth_kwargs()
     for attempt in range(3):
@@ -129,10 +136,16 @@ async def get_rerank_scores(client: httpx.AsyncClient, query: str, targets: list
     return []
 
 @app.get("/health")
-async def health() -> dict[str, str]: return {"status": "ok"}
+async def health() -> dict[str, str]:
+    """Проверка доступности сервиса."""
+    return {"status": "ok"}
 
 @app.post("/search", response_model=SearchAPIResponse)
 async def search(payload: dict) -> SearchAPIResponse:
+    """
+    Основная точка входа для поиска.
+    Реализует многостадийный пайплайн: гибридный поиск, RRF-слияние и реранжирование.
+    """
     start_time = time.perf_counter()
     q_data = payload.get("question", {})
     query = q_data.get("text", "").strip()
