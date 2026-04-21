@@ -34,7 +34,7 @@ QDRANT_SPARSE_VECTOR_NAME = os.getenv("QDRANT_SPARSE_VECTOR_NAME", "sparse")
 OPEN_API_LOGIN = os.getenv("OPEN_API_LOGIN")
 OPEN_API_PASSWORD = os.getenv("OPEN_API_PASSWORD")
 
-# V23 ALPHA-BLENDING LIMITS: Приоритизация семантики через глубину поиска
+# Приоритизация семантики через глубину поиска
 DENSE_LIMIT = 150
 HYDE_LIMIT = 120
 SPARSE_OPT_LIMIT = 100
@@ -121,7 +121,7 @@ async def embed_dense(client: httpx.AsyncClient, text: str) -> list[float]:
 
 
 async def embed_sparse(text: str) -> dict[str, Any]:
-    """Локальная генерация разреженных векторов (BM25)."""
+    """Локальная генерация разреженных векторов."""
     vectors = list(get_sparse_model().embed([text[:MAX_CHARS]]))
     item = vectors[0]
     return {"indices": item.indices.tolist(), "values": item.values.tolist()}
@@ -185,7 +185,7 @@ async def search(payload: dict) -> SearchAPIResponse:
     client: httpx.AsyncClient = app.state.http
     qdrant: AsyncQdrantClient = app.state.qdrant
 
-    # ЭТАП 1: Параллельное извлечение кандидатов с весовыми лимитами
+    # Этап 1: параллельное извлечение кандидатов с весовыми лимитами
     t_retr_start = time.perf_counter()
     dense_task = embed_dense(client, query)
     hyde_task = embed_dense(client, hyde[0]) if hyde else asyncio.sleep(0, [])
@@ -228,7 +228,7 @@ async def search(payload: dict) -> SearchAPIResponse:
     if not response.points:
         return SearchAPIResponse(results=[SearchAPIItem(message_ids=[])])
 
-    # ЭТАП 2: Реранкинг
+    # Этап 2: реранкинг
     t_rank_start = time.perf_counter()
     points = response.points
     candidates = points[:RERANK_LIMIT]
@@ -256,7 +256,7 @@ async def search(payload: dict) -> SearchAPIResponse:
     scored = sorted(scored, key=lambda x: x[0], reverse=True)
     t_rank = time.perf_counter() - t_rank_start
 
-    # ЭТАП 3: Формирование финальной выдачи
+    # Этап 3: формирование финальной выдачи
     final_ids: list[str] = []
     seen: set[str] = set()
     for _, p in scored[:10]:
@@ -281,7 +281,7 @@ async def search(payload: dict) -> SearchAPIResponse:
             break
 
     latency = time.perf_counter() - start_time
-    logger.info(f"Search Finished (V23): latency={latency:.3f}s")
+    logger.info(f"Search Finished: latency={latency:.3f}s")
     return SearchAPIResponse(results=[SearchAPIItem(message_ids=final_ids[:50])])
 
 
